@@ -19,7 +19,7 @@ RESPONSE_FILE="/tmp/tlscontact_response.html"
 LOG_FILE="/tmp/appointment_checker.log"
 
 # User-Agent pour éviter la détection
-USER_AGENT="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
@@ -47,40 +47,89 @@ send_email() {
 }
 
 login() {
-    log "Connexion au site TLS Contact..."
+    log "Tentative de connexion au site TLS Contact..."
 
-    # Première requête pour obtenir les cookies et tokens CSRF
+    sleep $((1 + RANDOM % 2))
+
+    # Première requête pour passer Cloudflare et obtenir les cookies
+    log "Étape 1: Accès à la page de connexion..."
+
     curl -s -L \
          -A "$USER_AGENT" \
          -c "$COOKIE_FILE" \
-         -D "$HEADERS_FILE" \
-         "$LOGIN_URL" > /dev/null
+         -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
+         -H "Accept-Language: fr-FR,fr;q=0.9,en;q=0.8,en-US;q=0.7" \
+         -H "Accept-Encoding: gzip, deflate, br" \
+         -H "DNT: 1" \
+         -H "Connection: keep-alive" \
+         -H "Upgrade-Insecure-Requests: 1" \
+         -H "Sec-Fetch-Dest: document" \
+         -H "Sec-Fetch-Mode: navigate" \
+         -H "Sec-Fetch-Site: none" \
+         -H "Cache-Control: max-age=0" \
+         "$LOGIN_URL" -o "$RESPONSE_FILE" 2>&1
 
     sleep $((2 + RANDOM % 3))
 
-    # Extraction du token CSRF si présent
-    CSRF_TOKEN=$(grep -oP 'csrf[_-]?token["\s:=]+\K[a-zA-Z0-9_-]+' "$RESPONSE_FILE" 2>/dev/null | head -1)
+    # Extraction du token CSRF ou autres paramètres
+    local csrf_token=""
+    if grep -q "_token\|csrf\|token" "$RESPONSE_FILE"; then
+        csrf_token=$(grep -oP '(?:_token|csrf)["\s:=]*value=["\s]*\K[a-zA-Z0-9_/+\-=]+' "$RESPONSE_FILE" 2>/dev/null | head -1)
+        if [ -n "$csrf_token" ]; then
+            log "Token CSRF trouvé: ${csrf_token:0:20}..."
+        fi
+    fi
 
     # Tentative de connexion
-    curl -s -L \
-         -A "$USER_AGENT" \
-         -b "$COOKIE_FILE" \
-         -c "$COOKIE_FILE" \
-         -D "$HEADERS_FILE" \
-         -H "Content-Type: application/x-www-form-urlencoded" \
-         -H "Origin: https://visas-fr.tlscontact.com" \
-         -H "Referer: $LOGIN_URL" \
-         --data-urlencode "email=$USERNAME" \
-         --data-urlencode "password=$PASSWORD" \
-         --data-urlencode "csrf_token=$CSRF_TOKEN" \
-         "$LOGIN_URL" -o "$RESPONSE_FILE"
+    log "Étape 2: Envoi des identifiants..."
+
+    if [ -n "$csrf_token" ]; then
+        curl -s -L \
+             -A "$USER_AGENT" \
+             -b "$COOKIE_FILE" \
+             -c "$COOKIE_FILE" \
+             -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
+             -H "Accept-Language: fr-FR,fr;q=0.9,en;q=0.8,en-US;q=0.7" \
+             -H "Content-Type: application/x-www-form-urlencoded" \
+             -H "Origin: https://visas-fr.tlscontact.com" \
+             -H "Referer: $LOGIN_URL" \
+             -H "Cache-Control: max-age=0" \
+             -H "Sec-Fetch-Dest: document" \
+             -H "Sec-Fetch-Mode: navigate" \
+             -H "Sec-Fetch-Site: same-origin" \
+             --data-urlencode "email=$USERNAME" \
+             --data-urlencode "password=$PASSWORD" \
+             --data-urlencode "_token=$csrf_token" \
+             "$LOGIN_URL" -o "$RESPONSE_FILE" 2>&1
+    else
+        curl -s -L \
+             -A "$USER_AGENT" \
+             -b "$COOKIE_FILE" \
+             -c "$COOKIE_FILE" \
+             -H "Content-Type: application/x-www-form-urlencoded" \
+             -H "Origin: https://visas-fr.tlscontact.com" \
+             -H "Referer: $LOGIN_URL" \
+             --data-urlencode "email=$USERNAME" \
+             --data-urlencode "password=$PASSWORD" \
+             "$LOGIN_URL" -o "$RESPONSE_FILE" 2>&1
+    fi
+
+    sleep 2
 
     # Vérification de la connexion réussie
-    if grep -q "logout\|dashboard\|appointment" "$RESPONSE_FILE" 2>/dev/null; then
-        log "Connexion réussie"
+    if grep -qi "logout\|mes rendez-vous\|my appointments\|dashboard\|bienvenue" "$RESPONSE_FILE" 2>/dev/null; then
+        log "Connexion réussie !"
         return 0
+    elif grep -qi "recaptcha\|challenge\|verify" "$RESPONSE_FILE" 2>/dev/null; then
+        log "ERREUR: reCAPTCHA détecté. Le site nécessite une vérification manuelle."
+        log "Solution: Connectez-vous manuellement une fois, puis relancez le script."
+        return 1
+    elif grep -qi "email\|password\|incorrect\|invalide" "$RESPONSE_FILE" 2>/dev/null; then
+        log "ERREUR: Email ou mot de passe incorrect"
+        return 1
     else
-        log "ERREUR: Échec de connexion"
+        log "ERREUR: Impossible de se connecter (vérifiez la réponse)"
+        log "Extrait de la réponse: $(head -c 200 "$RESPONSE_FILE")"
         return 1
     fi
 }
@@ -88,29 +137,32 @@ login() {
 check_appointments() {
     log "Vérification des créneaux disponibles..."
 
-    # Délai aléatoire pour simuler un comportement humain
-    sleep $((2 + RANDOM % 4))
+    sleep $((1 + RANDOM % 3))
 
     # Requête pour vérifier les rendez-vous
     curl -s -L \
          -A "$USER_AGENT" \
          -b "$COOKIE_FILE" \
          -c "$COOKIE_FILE" \
-         -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
-         -H "Accept-Language: fr-FR,fr;q=0.9,en;q=0.8" \
+         -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
+         -H "Accept-Language: fr-FR,fr;q=0.9,en;q=0.8,en-US;q=0.7" \
+         -H "Accept-Encoding: gzip, deflate, br" \
          -H "Referer: https://visas-fr.tlscontact.com/" \
-         "$CHECK_URL" -o "$RESPONSE_FILE"
+         -H "DNT: 1" \
+         -H "Connection: keep-alive" \
+         -H "Upgrade-Insecure-Requests: 1" \
+         "$CHECK_URL" -o "$RESPONSE_FILE" 2>&1
 
     # Vérification si la session a expiré
-    if grep -q "login\|connexion\|sign.in" "$RESPONSE_FILE" 2>/dev/null; then
+    if grep -qi "login\|connexion\|sign.in\|authentification" "$RESPONSE_FILE" 2>/dev/null; then
         log "Session expirée, reconnexion..."
         login
         return 2
     fi
 
-    # Recherche de créneaux disponibles (adapter selon le HTML du site)
-    if grep -qi "available\|disponible\|rendez-vous disponible\|créneau disponible\|book now\|réserver" "$RESPONSE_FILE" 2>/dev/null; then
-        if ! grep -qi "aucun.*disponible\|no.*available\|complet" "$RESPONSE_FILE" 2>/dev/null; then
+    # Recherche de créneaux disponibles
+    if grep -qi "disponible\|available.*slot\|book.*appointment\|réserver" "$RESPONSE_FILE" 2>/dev/null; then
+        if ! grep -qi "aucun.*disponible\|no.*slot\|fully booked\|complet" "$RESPONSE_FILE" 2>/dev/null; then
             log "CRÉNEAU TROUVÉ !"
             return 0
         fi
@@ -121,12 +173,13 @@ check_appointments() {
 }
 
 main_loop() {
-    log "=== Démarrage du script de surveillance ==="
+    log "=== Démarrage du script de surveillance TLS Contact ==="
+    log "Vérification toutes les 5 minutes"
 
     # Connexion initiale
     if ! login; then
         log "ERREUR CRITIQUE: Impossible de se connecter. Vérifiez vos identifiants."
-        send_email "Erreur - Script Rendez-vous" "Impossible de se connecter au site TLS Contact. Vérifiez les identifiants."
+        send_email "Erreur - Script Rendez-vous" "Impossible de se connecter au site TLS Contact.\n\nVérifiez:\n1. Les identifiants\n2. Pas de reCAPTCHA bloquant\n3. La connexion manuelle fonctionne"
         exit 1
     fi
 
@@ -151,7 +204,7 @@ main_loop() {
             0)
                 # Créneau trouvé !
                 log "!!! ALERTE: Créneau de rendez-vous détecté !!!"
-                send_email "🎯 RENDEZ-VOUS DISPONIBLE - TLS Contact" \
+                send_email "RENDEZ-VOUS DISPONIBLE - TLS Contact" \
                            "Un créneau de rendez-vous est maintenant disponible !\n\nURL: $CHECK_URL\n\nConnectez-vous rapidement pour réserver.\n\nDate de détection: $(date '+%Y-%m-%d %H:%M:%S')"
 
                 # Copie du fichier de réponse pour analyse
