@@ -1,0 +1,127 @@
+═══════════════════════════════════════════════════════════════
+  INSTALLATION DU SCRIPT DE SURVEILLANCE DE RENDEZ-VOUS
+═══════════════════════════════════════════════════════════════
+
+1. COPIER LE SCRIPT SUR LE SERVEUR
+   ---------------------------------
+   scp check_appointment.sh user@votre-serveur:/home/user/
+   ssh user@votre-serveur
+
+
+2. CONFIGURATION DU SCRIPT
+   ------------------------
+   Éditez le fichier et modifiez ces variables :
+
+   nano check_appointment.sh
+
+   USERNAME="votre_email@example.com"
+   PASSWORD="votre_mot_de_passe"
+   EMAIL_TO="email_pour_notifications@example.com"
+
+   # Pour Gmail :
+   SMTP_USER="votre_email@gmail.com"
+   SMTP_PASSWORD="mot_de_passe_application"
+   # (Créez un mot de passe d'application Gmail si 2FA activé)
+
+
+3. RENDRE LE SCRIPT EXÉCUTABLE
+   ----------------------------
+   chmod +x check_appointment.sh
+
+
+4. INSTALLER LES DÉPENDANCES
+   --------------------------
+   # Sur Ubuntu/Debian :
+   sudo apt-get update
+   sudo apt-get install -y curl mailutils
+
+   # Sur CentOS/RHEL :
+   sudo yum install -y curl mailx
+
+
+5. LANCER LE SCRIPT
+   -----------------
+
+   Option A - En arrière-plan avec nohup :
+   nohup ./check_appointment.sh > /dev/null 2>&1 &
+
+   Option B - Avec screen (recommandé) :
+   screen -S appointment
+   ./check_appointment.sh
+   # Puis Ctrl+A puis D pour détacher
+
+   Option C - Avec systemd (service permanent) :
+   Voir section SYSTEMD ci-dessous
+
+
+6. VÉRIFIER LE FONCTIONNEMENT
+   ---------------------------
+   # Voir les logs en temps réel :
+   tail -f /tmp/appointment_checker.log
+
+   # Vérifier que le processus tourne :
+   ps aux | grep check_appointment
+
+
+7. ARRÊTER LE SCRIPT
+   ------------------
+   # Si lancé avec nohup :
+   pkill -f check_appointment.sh
+
+   # Si lancé avec screen :
+   screen -r appointment
+   # Puis Ctrl+C
+
+
+═══════════════════════════════════════════════════════════════
+  INSTALLATION COMME SERVICE SYSTEMD (RECOMMANDÉ)
+═══════════════════════════════════════════════════════════════
+
+1. Créer le fichier service :
+   sudo nano /etc/systemd/system/appointment-checker.service
+
+2. Coller ce contenu :
+
+[Unit]
+Description=TLS Contact Appointment Checker
+After=network.target
+
+[Service]
+Type=simple
+User=votre_user
+WorkingDirectory=/home/votre_user
+ExecStart=/bin/bash /home/votre_user/check_appointment.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
+3. Activer et démarrer le service :
+   sudo systemctl daemon-reload
+   sudo systemctl enable appointment-checker
+   sudo systemctl start appointment-checker
+
+4. Commandes utiles :
+   sudo systemctl status appointment-checker  # Voir le statut
+   sudo systemctl stop appointment-checker    # Arrêter
+   sudo systemctl restart appointment-checker # Redémarrer
+   sudo journalctl -u appointment-checker -f  # Voir les logs
+
+
+═══════════════════════════════════════════════════════════════
+  NOTES IMPORTANTES
+═══════════════════════════════════════════════════════════════
+
+✓ Le script maintient automatiquement la session active
+✓ Reconnexion automatique toutes les 2 heures
+✓ Délais aléatoires pour éviter la détection
+✓ Gestion de Cloudflare via cookies et headers
+✓ Logs détaillés dans /tmp/appointment_checker.log
+
+⚠ Adaptez les sélecteurs HTML si le site change de structure
+⚠ Pour Gmail, activez "Accès application moins sécurisée" ou
+   utilisez un mot de passe d'application
+
+📧 Pour tester l'envoi d'email :
+   echo "Test" | mail -s "Test Email" votre_email@example.com
